@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "BleCombo.cpp"
+        "BleComboKeyboard.cpp"
+        "BleComboMouse.cpp"
+        "BleConnectionStatus.cpp"
+        "KeyboardOutputCallbacks.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        arduino-esp32
+)

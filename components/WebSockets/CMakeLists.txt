@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "src/SocketIOclient.cpp"
+        "src/WebSockets.cpp"
+        "src/WebSocketsClient.cpp"
+        "src/WebSocketsServer.cpp"
+        "src/libb64/cencode.c"
+        "src/libb64/cdecode.c"
+        "src/libsha1/libsha1.c"
+    INCLUDE_DIRS
+        "src"
+        "src/libb64"
+        "src/libsha1"
+    REQUIRES
+        arduino-esp32
+)
