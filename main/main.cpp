@@ -108,15 +108,30 @@ const char* SETUP_HTML = R"HTMLPAGE(
 // --------------------------------------------------------
 // Dual-Routing HID Functions 
 // --------------------------------------------------------
+
+// --- accumulator state (file scope) ---
+static int pendingDx = 0, pendingDy = 0, pendingDz = 0;
+static unsigned long lastFlushMs = 0;
+const unsigned long FLUSH_INTERVAL_MS = 8;   // ~125 Hz, matches HID poll rate
+
+
 void routeMouseMove(int dx, int dy) {
-  usbMouse.move(dx, dy);
-  if (Keyboard.isConnected()) Mouse.move(dx, dy, 0);
+  pendingDx = constrain(pendingDx + dx, -127, 127);
+  pendingDy = constrain(pendingDy + dy, -127, 127);
 }
 
 void routeMouseScroll(int dz) {
-  // Move the scroll wheel (3rd parameter) on both drivers
-  usbMouse.move(0, 0, dz);
-  if (Keyboard.isConnected()) Mouse.move(0, 0, dz);
+  pendingDz = constrain(pendingDz + dz, -127, 127);
+}
+
+void flushMouseIfDue() {
+  if (millis() - lastFlushMs < FLUSH_INTERVAL_MS) return;
+  lastFlushMs = millis();
+  if (pendingDx || pendingDy || pendingDz) {
+    usbMouse.move(pendingDx, pendingDy, pendingDz);
+    if (Keyboard.isConnected()) Mouse.move(pendingDx, pendingDy, pendingDz);
+    pendingDx = pendingDy = pendingDz = 0;
+  }
 }
 
 void routeMouseClick(char btn) {
@@ -246,6 +261,7 @@ void setup() {
   usbMouse.begin();
   usbKeyboard.begin();
   USB.begin(); 
+  Serial.println("[USB] USB.begin() called");
   Keyboard.begin(); 
   Mouse.begin();    
 
@@ -319,11 +335,13 @@ void setup() {
   }
 }
 
+
 // --------------------------------------------------------
 // Loop
 // --------------------------------------------------------
 void loop() {
   updateLED(); 
+  flushMouseIfDue();
 
   if (digitalRead(BOOT_BUTTON) == LOW) {
     if (!buttonIsPressed) {
@@ -372,11 +390,15 @@ void loop() {
     }
   }
 }
-extern "C" void app_main() {
-    initArduino();   // sets up Arduino core internals
-    setup();         // your existing setup()
-    while (true) {
-        loop();       // your existing loop()
-        vTaskDelay(1); 
+static void loopTask(void *pvParameters) {
+    setup();
+    for (;;) {
+        loop();
+        vTaskDelay(1);
     }
+}
+
+extern "C" void app_main() {
+    initArduino();
+    xTaskCreatePinnedToCore(loopTask, "loopTask", 8192, NULL, 1, NULL, 1);  // Core 1, matches Arduino IDE
 }
