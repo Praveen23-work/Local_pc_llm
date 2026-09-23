@@ -23,6 +23,7 @@ WebSocketsClient webSocket;
 
 USBHIDMouse usbMouse;
 USBHIDKeyboard usbKeyboard;
+volatile bool nativeUsbActive = false;
 
 // --- State Variables ---
 bool setupMode = false;
@@ -128,30 +129,29 @@ void flushMouseIfDue() {
   if (millis() - lastFlushMs < FLUSH_INTERVAL_MS) return;
   lastFlushMs = millis();
   if (pendingDx || pendingDy || pendingDz) {
-    usbMouse.move(pendingDx, pendingDy, pendingDz);
-    if (Keyboard.isConnected()) Mouse.move(pendingDx, pendingDy, pendingDz);
+    if (nativeUsbActive) {
+      usbMouse.move(pendingDx, pendingDy, pendingDz);
+    } else if (Keyboard.isConnected()) {
+      Mouse.move(pendingDx, pendingDy, pendingDz);
+    }
     pendingDx = pendingDy = pendingDz = 0;
   }
 }
 
 void routeMouseClick(char btn) {
-  if (btn == 'R') {
-    usbMouse.click(MOUSE_RIGHT);
-    if (Keyboard.isConnected()) Mouse.click(MOUSE_RIGHT);
-  } else {
-    usbMouse.click(MOUSE_LEFT);
-    if (Keyboard.isConnected()) Mouse.click(MOUSE_LEFT);
-  }
+  uint8_t b = (btn == 'R') ? MOUSE_RIGHT : MOUSE_LEFT;
+  if (nativeUsbActive) usbMouse.click(b);
+  else if (Keyboard.isConnected()) Mouse.click(b);
 }
 
 void routeKeyboardWrite(uint8_t c) {
-  usbKeyboard.write(c);
-  if (Keyboard.isConnected()) Keyboard.write(c);
+  if (nativeUsbActive) usbKeyboard.write(c);
+  else if (Keyboard.isConnected()) Keyboard.write(c);
 }
 
 void routeKeyboardReleaseAll() {
-  usbKeyboard.releaseAll();
-  if (Keyboard.isConnected()) Keyboard.releaseAll();
+  if (nativeUsbActive) usbKeyboard.releaseAll();
+  else if (Keyboard.isConnected()) Keyboard.releaseAll();
 }
 
 void typeStringSlowly(const String& text, unsigned int delayMs) {
@@ -160,6 +160,14 @@ void typeStringSlowly(const String& text, unsigned int delayMs) {
     if (!setupMode) webSocket.loop(); 
     updateLED(); 
     delay(delayMs);
+  }
+}
+
+void onUsbEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+  if (event_id == ARDUINO_USB_STARTED_EVENT || event_id == ARDUINO_USB_RESUME_EVENT) {
+    nativeUsbActive = true;
+  } else if (event_id == ARDUINO_USB_STOPPED_EVENT || event_id == ARDUINO_USB_SUSPEND_EVENT) {
+    nativeUsbActive = false;
   }
 }
 
@@ -260,6 +268,11 @@ void setup() {
 
   usbMouse.begin();
   usbKeyboard.begin();
+  USB.PID(0x1001);
+  USB.VID(0x303A);
+  usbMouse.begin();
+  usbKeyboard.begin();
+  USB.onEvent(onUsbEvent);
   USB.begin(); 
   Serial.println("[USB] USB.begin() called");
   Keyboard.begin(); 
