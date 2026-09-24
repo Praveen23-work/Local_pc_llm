@@ -25,6 +25,16 @@ USBHIDMouse usbMouse;
 USBHIDKeyboard usbKeyboard;
 volatile bool nativeUsbActive = false;
 
+// --- accumulator state (file scope) ---
+static int pendingDx = 0, pendingDy = 0, pendingDz = 0;
+static unsigned long lastFlushMs = 0;
+unsigned long flushIntervalMs = 8;   // now mutable, loaded from NVS below
+unsigned int typeDelayMs = 15;
+unsigned long wifiReconnectMs = 5000;
+unsigned long ledBlinkMs = 1000;
+uint8_t ledR = 0, ledG = 64, ledB = 0;  // default green (CONNECTED-state blink color)
+
+
 // --- State Variables ---
 bool setupMode = false;
 String savedSSID = "";
@@ -46,19 +56,18 @@ bool ledIsOn = false;
 
 void updateLED() {
   if (currentState == STATE_SETUP) {
-    neopixelWrite(RGB_BUILTIN, 0, 0, 64); // Solid Blue
+    neopixelWrite(RGB_BUILTIN, 0, 0, 64);
   } else if (currentState == STATE_SAVING) {
-    neopixelWrite(RGB_BUILTIN, 64, 32, 0); // Solid Orange
+    neopixelWrite(RGB_BUILTIN, 64, 32, 0);
   } else {
-    // 1-second interval blinker
-    if (millis() - lastLedTime > 1000) {
+    if (millis() - lastLedTime > ledBlinkMs) {
       lastLedTime = millis();
       ledIsOn = !ledIsOn;
       if (ledIsOn) {
-        if (currentState == STATE_CONNECTED) neopixelWrite(RGB_BUILTIN, 0, 64, 0); // Green
-        else neopixelWrite(RGB_BUILTIN, 64, 0, 0); // Red
+        if (currentState == STATE_CONNECTED) neopixelWrite(RGB_BUILTIN, ledR, ledG, ledB);
+        else neopixelWrite(RGB_BUILTIN, 64, 0, 0);
       } else {
-        neopixelWrite(RGB_BUILTIN, 0, 0, 0); // Off
+        neopixelWrite(RGB_BUILTIN, 0, 0, 0);
       }
     }
   }
@@ -110,11 +119,6 @@ const char* SETUP_HTML = R"HTMLPAGE(
 // Dual-Routing HID Functions 
 // --------------------------------------------------------
 
-// --- accumulator state (file scope) ---
-static int pendingDx = 0, pendingDy = 0, pendingDz = 0;
-static unsigned long lastFlushMs = 0;
-const unsigned long FLUSH_INTERVAL_MS = 8;   // ~125 Hz, matches HID poll rate
-
 
 void routeMouseMove(int dx, int dy) {
   pendingDx = constrain(pendingDx + dx, -127, 127);
@@ -126,7 +130,7 @@ void routeMouseScroll(int dz) {
 }
 
 void flushMouseIfDue() {
-  if (millis() - lastFlushMs < FLUSH_INTERVAL_MS) return;
+  if (millis() - lastFlushMs < flushIntervalMs) return;
   lastFlushMs = millis();
   if (pendingDx || pendingDy || pendingDz) {
     if (nativeUsbActive) {
@@ -201,7 +205,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     else if (data.startsWith("C:")) routeMouseClick(data.charAt(2));
     else if (data.startsWith("T:")) {
       String text = data.substring(2);
-      typeStringSlowly(text, 15);
+      typeStringSlowly(text, typeDelayMs);
       routeKeyboardReleaseAll();
     } 
     else if (data == "B:") routeKeyboardWrite(8); // Backspace
@@ -282,6 +286,13 @@ void setup() {
   preferences.begin("remote", false); 
   
   bool forceSetup = preferences.getBool("force_setup", false);
+  flushIntervalMs = preferences.getULong("flush_interval", 8);
+  typeDelayMs = preferences.getUInt("type_delay", 15);
+  wifiReconnectMs = preferences.getULong("wifi_reconnect", 5000);
+  ledBlinkMs = preferences.getULong("led_ms", 1000);
+  ledR = preferences.getUChar("led_r", 0);
+  ledG = preferences.getUChar("led_g", 64);
+  ledB = preferences.getUChar("led_b", 0);
   if (forceSetup) {
     Serial.println("[BOOT] Force setup flag detected. Clearing flag for next reset.");
     preferences.putBool("force_setup", false);
@@ -348,6 +359,69 @@ void setup() {
   }
 }
 
+// --------------------------------------------------------
+// Serial Command Listener (prompt-driven variable updates)
+// --------------------------------------------------------
+static String serialBuf = "";
+
+bool isKnownStringKey(const String& k) {
+  return k == "ssid" || k == "pass" || k == "host" || k == "key";
+}
+
+bool isKnownIntKey(const String& k) {
+  return k == "flush_ms" || k == "type_ms" || k == "recon_ms"
+      || k == "led_ms" || k == "led_r" || k == "led_g" || k == "led_b";
+}
+
+void applyIntKey(const String& k, long v) {
+  preferences.begin("remote", false);
+  preferences.putULong(k.c_str(), v);
+  preferences.end();
+  if (k == "flush_ms") flushIntervalMs = v;
+  else if (k == "type_ms") typeDelayMs = (unsigned int)v;
+  else if (k == "recon_ms") wifiReconnectMs = v;
+  else if (k == "led_ms") ledBlinkMs = v;
+  else if (k == "led_r") ledR = (uint8_t)v;
+  else if (k == "led_g") ledG = (uint8_t)v;
+  else if (k == "led_b") ledB = (uint8_t)v;
+}
+
+void handleSerialCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      serialBuf.trim();
+      if (serialBuf.startsWith("SET ")) {
+        String rest = serialBuf.substring(4);
+        int sp = rest.indexOf(' ');
+        if (sp != -1) {
+          String key = rest.substring(0, sp);
+          String val = rest.substring(sp + 1);
+
+          if (isKnownStringKey(key)) {
+            preferences.begin("remote", false);
+            preferences.putString(key.c_str(), val);
+            preferences.end();
+            Serial.println("OK " + key + " saved (reboot required to apply)");
+          } else if (isKnownIntKey(key)) {
+            applyIntKey(key, val.toInt());
+            Serial.println("OK " + key + "=" + val + " applied immediately");
+          } else {
+            Serial.println("ERR unknown key: " + key);
+          }
+        } else {
+          Serial.println("ERR malformed command");
+        }
+      } else {
+        Serial.println("ERR expected 'SET <key> <value>'");
+      }
+      serialBuf = "";
+    } else if (c != '\r') {
+      serialBuf += c;
+    }
+  }
+}
+
 
 // --------------------------------------------------------
 // Loop
@@ -355,6 +429,7 @@ void setup() {
 void loop() {
   updateLED(); 
   flushMouseIfDue();
+  handleSerialCommands();
 
   if (digitalRead(BOOT_BUTTON) == LOW) {
     if (!buttonIsPressed) {
@@ -383,7 +458,7 @@ void loop() {
     static unsigned long lastWifiCheck = 0;
     if (WiFi.status() != WL_CONNECTED) {
       currentState = STATE_DISCONNECTED;
-      if (millis() - lastWifiCheck > 5000) {
+      if (millis() - lastWifiCheck > wifiReconnectMs) {
         WiFi.reconnect();
         lastWifiCheck = millis();
       }
